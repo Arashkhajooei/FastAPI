@@ -1,11 +1,10 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Query
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, DateTime, Float
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship,Session
 from pydantic import BaseModel
-from datetime import datetime
-from typing import Optional,Union
-from datetime import date
+from typing import Optional,Union,List
+from datetime import date,datetime
 
 # Create the FastAPI app
 app = FastAPI()
@@ -16,27 +15,26 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Pydantic models
 class ProductBase(BaseModel):
     product_name: str
     description: str
     category_id: int
     supplier_id: int
     quantity_in_stock: int
-    date_added: date
+    date_added: datetime
     warehouse_id: int
     unit_price: float
+
 
 class ProductCreate(ProductBase):
     pass
 
 class Product(ProductBase):
     product_id: int
-    date_added: date  # Change the type to date
-    warehouse_id: Optional[Union[int, None]]
+    warehouse_id: Optional[int]
 
     class Config:
-        from_orm = True
+        orm_mode = True
 
 class SupplierBase(BaseModel):
     supplier_name: str
@@ -176,6 +174,9 @@ class WarehouseDetail(WarehouseDetailBase):
     class Config:
         from_orm = True
 
+
+
+
 # SQLAlchemy models
 class ProductModel(Base):
     __tablename__ = "products"
@@ -188,7 +189,7 @@ class ProductModel(Base):
     unit_price = Column(Float)
     date_added = Column(DateTime, default=datetime.utcnow)
     warehouse_id = Column(Integer, ForeignKey("warehouses.warehouse_id"))
-
+    deliveries = relationship("DeliveryModel", back_populates="product")
     category = relationship("CategoryModel", back_populates="products")
     supplier = relationship("SupplierModel", back_populates="products")
     warehouse = relationship("WarehouseDetailModel", back_populates="products")
@@ -253,7 +254,12 @@ class DeliveryModel(Base):
     delivered_by = Column(String)
     recipient_name = Column(String)
     recipient_contact = Column(String)
+    delivered_by = Column(String)
+    recipient_name = Column(String)
 
+    # Add the relationship to ProductModel
+    product_id = Column(Integer, ForeignKey("products.product_id"))
+    product = relationship("ProductModel", back_populates="deliveries")
     order = relationship("OrderModel", back_populates="deliveries")  # Add this line
 
 class TransactionModel(Base):
@@ -293,8 +299,11 @@ def get_db():
         db.close()
 
 # Endpoints for CRUD operations
+@app.get('/', tags=["Root"])
+def read_root():
+    return {"message": "Welcome to the Warehouse API"}
 
-# Example endpoint to create a product
+#Example endpoint to create a product
 @app.post("/products/", response_model=Product)
 def create_product(product: ProductBase, db: Session = Depends(get_db)):
     db_product = ProductModel(**product.dict())
@@ -302,3 +311,32 @@ def create_product(product: ProductBase, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_product)
     return db_product
+
+
+@app.get("/products/", response_model=List[Product])
+def get_products_by_dates(
+    start_date: datetime = Query(None),
+    end_date: datetime = Query(None),
+):
+    try:
+        # Convert the dates to strings in the format of your 'date_added' field
+        start_date_str = start_date.strftime('%Y-%m-%d %H:%M:%S') if start_date else None
+        end_date_str = end_date.strftime('%Y-%m-%d %H:%M:%S') if end_date else None
+
+        # Get a session from the SessionLocal class
+        db: Session = SessionLocal()
+
+        # Query the products with date_added between the specified start_date and end_date
+        products = db.query(ProductModel).filter(ProductModel.date_added.between(start_date_str, end_date_str)).all()
+
+        # Close the session
+        db.close()
+
+        # Return the products
+        return products
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
