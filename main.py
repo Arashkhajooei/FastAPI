@@ -34,7 +34,7 @@ class Product(ProductBase):
     warehouse_id: Optional[int]
 
     class Config:
-        orm_mode = True
+        from_orm = True
 
 class SupplierBase(BaseModel):
     supplier_name: str
@@ -125,6 +125,11 @@ class DeliveryBase(BaseModel):
 
 class DeliveryCreate(DeliveryBase):
     pass
+class DeliveryCreate(BaseModel):
+    delivery_date_time: datetime
+    delivered_by: str
+    recipient_name: str
+    recipient_contact: str
 
 class Delivery(DeliveryBase):
     delivery_id: int
@@ -193,6 +198,9 @@ class ProductModel(Base):
     category = relationship("CategoryModel", back_populates="products")
     supplier = relationship("SupplierModel", back_populates="products")
     warehouse = relationship("WarehouseDetailModel", back_populates="products")
+    exits = relationship("WarehouseExitModel", back_populates="product")
+    entries = relationship("WarehouseEntryModel", back_populates="product")
+    transactions = relationship("TransactionModel", back_populates="product")
 
 class SupplierModel(Base):
     __tablename__ = "suppliers"
@@ -233,6 +241,7 @@ class WarehouseEntryModel(Base):
     entered_by = Column(String)
     historical = Column(Boolean)
     warehouse_id = Column(Integer, ForeignKey("warehouses.warehouse_id"))
+    product = relationship("ProductModel", back_populates="entries")
 
 class WarehouseExitModel(Base):
     __tablename__ = "warehouse_exits"
@@ -245,6 +254,7 @@ class WarehouseExitModel(Base):
     recipient_contact = Column(String)
     historical = Column(Boolean)
     warehouse_id = Column(Integer, ForeignKey("warehouses.warehouse_id"))
+    product = relationship("ProductModel", back_populates="exits")
 
 class DeliveryModel(Base):
     __tablename__ = "deliveries"
@@ -270,6 +280,10 @@ class TransactionModel(Base):
     transaction_type = Column(String)
     quantity = Column(Integer)
     related_id = Column(Integer)
+    transaction_description = Column(String)
+    product_id = Column(Integer, ForeignKey("products.product_id"))
+    product = relationship("ProductModel", back_populates="transactions")
+
 
 class CategoryModel(Base):
     __tablename__ = "categories"
@@ -304,39 +318,211 @@ def read_root():
     return {"message": "Welcome to the Warehouse API"}
 
 #Example endpoint to create a product
+# @app.post("/products/", response_model=Product)
+# def create_product(product: ProductBase, db: Session = Depends(get_db)):
+#     db_product = ProductModel(**product.dict())
+#     db.add(db_product)
+#     db.commit()
+#     db.refresh(db_product)
+#     return db_product
+
+
 @app.post("/products/", response_model=Product)
-def create_product(product: ProductBase, db: Session = Depends(get_db)):
-    db_product = ProductModel(**product.dict())
-    db.add(db_product)
-    db.commit()
-    db.refresh(db_product)
-    return db_product
-
-
-@app.get("/products/", response_model=List[Product])
-def get_products_by_dates(
-    start_date: datetime = Query(None),
-    end_date: datetime = Query(None),
-):
+def create_product(product: ProductCreate, delivery_info: DeliveryCreate, db: Session = Depends(get_db)):
     try:
-        # Convert the dates to strings in the format of your 'date_added' field
-        start_date_str = start_date.strftime('%Y-%m-%d %H:%M:%S') if start_date else None
-        end_date_str = end_date.strftime('%Y-%m-%d %H:%M:%S') if end_date else None
+        # Create the product in the database
+        db_product = ProductModel(**product.dict())
+        db.add(db_product)
+        db.commit()
+        db.refresh(db_product)
 
-        # Get a session from the SessionLocal class
-        db: Session = SessionLocal()
+        # Create the delivery entry for the product
+        delivery = DeliveryModel(
+            order_id=0,  # Assuming this is a placeholder value for the order_id
+            delivery_date_time=delivery_info.delivery_date_time,
+            delivered_by=delivery_info.delivered_by,
+            recipient_name=delivery_info.recipient_name,
+            recipient_contact=delivery_info.recipient_contact,
+            product_id=db_product.product_id
+        )
+        db.add(delivery)
+        db.commit()
 
-        # Query the products with date_added between the specified start_date and end_date
-        products = db.query(ProductModel).filter(ProductModel.date_added.between(start_date_str, end_date_str)).all()
+        transaction = TransactionModel(
+            transaction_date_time=datetime.utcnow(),
+            product_id=db_product.product_id,
+            transaction_type="addition",
+            quantity=product.quantity_in_stock,
+            related_id=db_product.product_id
+        )
+        db.add(transaction)
+        db.commit()
 
-        # Close the session
-        db.close()
-
-        # Return the products
-        return products
+        return db_product
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 
+
+@app.get("/products/", response_model=List[Product])
+def get_products_by_dates(
+    start_date: datetime = Query(None),
+    end_date: datetime = Query(None),
+    db: Session = Depends(get_db)
+):
+    try:
+        # Convert the dates to strings in the format of your 'date_added' field
+        start_date_str = start_date.strftime('%Y-%m-%d %H:%M:%S') if start_date else None
+        end_date_str = end_date.strftime('%Y-%m-%d %H:%M:%S') if end_date else None
+
+        # Query the products with date_added between the specified start_date and end_date
+        products_with_deliveries = db.query(ProductModel, DeliveryModel).\
+            join(DeliveryModel, ProductModel.product_id == DeliveryModel.product_id).\
+            filter(DeliveryModel.delivery_date_time.between(start_date_str, end_date_str)).all()
+
+        # Create a list to store the response data
+        result = []
+
+        # Iterate through the products and extract the relevant data
+        for product, delivery in products_with_deliveries:
+            product_data = {
+                "product_id": product.product_id,
+                "product_name": product.product_name,
+                "description": product.description,
+                "category_id": product.category_id,
+                "supplier_id": product.supplier_id,
+                "quantity_in_stock": product.quantity_in_stock,
+                "date_added": product.date_added,
+                "warehouse_id": product.warehouse_id,
+                "unit_price": product.unit_price,
+                "delivery_date_time": delivery.delivery_date_time,
+                "delivered_by": delivery.delivered_by,
+                "recipient_name": delivery.recipient_name,
+                "recipient_contact": delivery.recipient_contact,
+            }
+            result.append(product_data)
+
+        # Return the products with delivery and recipient information
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/products/{product_id}/exit/", response_model=Product)
+def exit_product(
+    product_id: int,
+    quantity_exited: int,
+    exited_by: str,
+    recipient_name: str,
+    recipient_contact: str,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Get the product from the database
+        product = db.query(ProductModel).filter(ProductModel.product_id == product_id).first()
+
+        if product is None:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        # Check if there's enough quantity to exit
+        if product.quantity_in_stock < quantity_exited:
+            raise HTTPException(status_code=400, detail="Insufficient quantity in stock")
+
+        # Update the quantity_in_stock
+        product.quantity_in_stock -= quantity_exited
+
+        # Create a new warehouse exit entry
+        db_exit = WarehouseExitModel(
+            product_id=product_id,
+            exit_date_time=datetime.utcnow(),
+            quantity_exited=quantity_exited,
+            exited_by=exited_by,
+            recipient_name=recipient_name,
+            recipient_contact=recipient_contact,
+            historical=False,
+            warehouse_id=product.warehouse_id
+        )
+        db.add(db_exit)
+        db.commit()
+        db.refresh(db_exit)
+
+        transaction = TransactionModel(
+            transaction_date_time=datetime.utcnow(),
+            product_id=product_id,
+            transaction_type="exit",
+            quantity=quantity_exited,
+            related_id=db_exit.exit_id
+        )
+        db.add(transaction)
+        db.commit()
+
+        # Update the product with the new quantity_in_stock
+        db.commit()
+
+        return product
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/products/{product_id}/deliver/", response_model=Product)
+def deliver_product(
+    product_id: int,
+    quantity_delivered: int,
+    delivered_by: str,
+    recipient_name: str,
+    recipient_contact: str,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Get the product from the database
+        product = db.query(ProductModel).filter(ProductModel.product_id == product_id).first()
+
+        if product is None:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        # Update the quantity_in_stock
+        product.quantity_in_stock += quantity_delivered
+
+        # Create a new warehouse entry
+        db_entry = WarehouseEntryModel(
+            product_id=product_id,
+            entry_date_time=datetime.utcnow(),
+            quantity_entered=quantity_delivered,
+            entered_by=delivered_by,
+            historical=False,
+            warehouse_id=product.warehouse_id
+        )
+        db.add(db_entry)
+        db.commit()
+        db.refresh(db_entry)
+
+        # Create a delivery transaction
+        transaction = TransactionModel(
+            transaction_date_time=datetime.utcnow(),
+            product_id=product_id,
+            transaction_type="delivery",
+            quantity=quantity_delivered,
+            related_id=db_entry.entry_id
+        )
+        db.add(transaction)
+        db.commit()
+        # Update the product with the new quantity_in_stock
+        db.commit()
+
+        return product
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/products/{product_id}/transactions/", response_model=List[Transaction])
+def get_product_transactions(product_id: int, db: Session = Depends(get_db)):
+    try:
+        # Query transactions for the given product_id
+        transactions = db.query(TransactionModel).filter(TransactionModel.product_id == product_id).all()
+        return transactions
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
